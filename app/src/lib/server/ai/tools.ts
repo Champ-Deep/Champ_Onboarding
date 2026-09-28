@@ -3,9 +3,10 @@
 // This file is the security perimeter for the whole feature, so the rules it
 // keeps are worth stating plainly:
 //
-//  1. NOTHING HERE WRITES. The model cannot change a single record. The one
-//     tool that touches access returns a *proposal*, which a human has to
-//     approve in the UI before anything happens. That is what stops a prompt
+//  1. NOTHING HERE WRITES. The model cannot change a single record. The tools
+//     that touch access or hand out work return a *draft* — a proposal, a
+//     request, a task — which a human has to press a button on before anything
+//     happens. That is what stops a prompt
 //     injection from becoming a permission change: candidate-supplied text
 //     reaches the model (names, addresses, reasons for leaving), a model cannot
 //     reliably tell data from instruction, so the model is never given the
@@ -27,6 +28,7 @@
 //     same access model the studio authors. A tool the caller cannot use is
 //     never offered to the model, so it cannot be talked into calling it.
 import { Admin, AuditLog, Candidate, Company, Exit, OfferLetter } from '$lib/server/db/schema';
+import { checkAccessRequest, checkTask, inboxFor, RequestError } from '$lib/server/requests';
 import {
 	CAPS,
 	MODULES,
@@ -151,9 +153,14 @@ const MAX_ROWS = 200;
 export interface ToolDef {
 	name: string;
 	description: string;
-	/** Capability the caller must hold, and at what level, to be offered it. */
-	cap: string;
+	/** Capability the caller must hold, and at what level, to be offered it.
+	 *  Absent means every signed-in admin — for tools about the caller's own
+	 *  requests and work, which everyone has. */
+	cap?: string;
 	min?: Level;
+	/** A further condition on who is offered it, for rules that are about the
+	 *  caller's role rather than a capability. */
+	when?: (caller: Caller) => boolean;
 	parameters: Record<string, unknown>;
 	run: (args: Record<string, unknown>, caller: Caller) => Promise<unknown>;
 }
@@ -378,8 +385,9 @@ export const TOOLS: ToolDef[] = [
 	{
 		name: 'capability_catalogue',
 		description:
-			'Every capability the access model defines, grouped by module, with its key and the levels it offers. Call this before proposing an access change so the proposal names a real capability.',
-		cap: 'team.view',
+			'Every capability the access model defines, grouped by module, with its key and the levels it offers. Call this before proposing an access change or drafting an access request, so it names a real capability.',
+		// Open to everyone: it describes the portal's sections, not anyone's
+		// data, and a teammate cannot ask for access without naming what for.
 		parameters: { type: 'object', properties: {} },
 		run: async () => ({
 			modules: MODULES.map((m) => ({
@@ -485,13 +493,161 @@ export const TOOLS: ToolDef[] = [
 				note: 'Nothing has changed. Present this to the user and tell them to use the Apply button on the proposal card.'
 			};
 		}
+	},
+	{
+		name: 'draft_access_request',
+		description:
+			'Draft a request, from the person you are talking to, for a capability they do not have. THIS SENDS NOTHING — it returns a card with a Send button, and the request only reaches the super admins when they press it. Call capability_catalogue first so the key is real.',
+		// A super admin already holds everything, so there is nothing to ask for.
+		when: (c) => c.role !== 'super_admin',
+		parameters: {
+			type: 'object',
+			properties: {
+				capability: { type: 'string', description: 'Capability key from capability_catalogue' },
+				level: { type: 'string', enum: ['view', 'act', 'approve'], description: 'The level they need. Use the lowest that does the job.' },
+				reason: { type: 'string', description: 'Why they need it, in their words, one line — the super admin reads this' }
+			},
+			required: ['capability', 'level']
+		},
+		run: async (args, caller) => {
+			const a = args as { capability?: string; level?: string; reason?: string };
+			try {
+				const { cap, level, from } = await checkAccessRequest(caller, String(a.capability ?? ''), String(a.level ?? ''));
+				return {
+					draft: {
+						kind: 'access',
+						capability: cap.key,
+						capabilityLabel: cap.label,
+						from,
+						to: level,
+						note: a.reason?.trim().slice(0, 500) || null,
+						implemented: cap.wired !== false
+					},
+					note: 'Nothing has been sent. Tell them to press Send on the card, and that it goes to the super admins to approve.'
+				};
+			} catch (e) {
+				if (e instanceof RequestError) return { error: e.message };
+				throw e;
+			}
+		}
+	},
+	{
+		name: 'draft_task',
+		description:
+			'Draft a piece of work for one teammate, e.g. "send the offer letter to Priya". THIS ASSIGNS NOTHING — it returns a card with an Assign button. Call list_logins first so the email is real. If the work is about a candidate, pass their name and the task links to their record.',
+		cap: 'team.view',
+		when: (c) => c.role === 'super_admin',
+		parameters: {
+			type: 'object',
+			properties: {
+				email: { type: 'string', description: 'The teammate doing the work, from list_logins' },
+				task: { type: 'string', description: 'What needs doing, as a short instruction addressed to them' },
+				candidateName: { type: 'string', description: 'The candidate it is about, if any' },
+				dueInDays: { type: 'number', description: 'Due in N days, if a deadline was given. 0 is today.' },
+				note: { type: 'string', description: 'Any extra context the person gave' }
+			},
+			required: ['email', 'task']
+		},
+		run: async (args, caller) => {
+			const a = args as { email?: string; task?: string; candidateName?: string; dueInDays?: number; note?: string };
+			const title = String(a.task ?? '').trim().slice(0, 500);
+			if (!title) return { error: 'Say what the task is.' };
+
+			let candidate: { _id: unknown; fullName?: string; email?: string } | null = null;
+			if (a.candidateName?.trim()) {
+				const name = a.candidateName.trim();
+				const hits = (await Candidate.find({
+					$or: [{ fullName: new RegExp(escapeRx(name), 'i') }, { email: new RegExp(escapeRx(name), 'i') }]
+				})
+					.select('fullName email status')
+					.limit(8)
+					.lean()) as { _id: unknown; fullName?: string; email?: string; status?: string }[];
+				const exact = hits.filter((h) => (h.fullName ?? '').toLowerCase() === name.toLowerCase());
+				const pick = exact.length === 1 ? exact : hits;
+				if (!pick.length) return { error: `No candidate matched "${name}". Ask who they meant.` };
+				// A task linked to the wrong candidate sends someone to the wrong
+				// record, so more than one match is a question, not a guess.
+				if (pick.length > 1)
+					return {
+						error: `More than one candidate matched "${name}". Ask which one — do not pick.`,
+						matches: pick.map((h) => ({ name: h.fullName ?? h.email, email: h.email, status: h.status }))
+					};
+				candidate = pick[0];
+			}
+
+			try {
+				const { assignee } = await checkTask(caller, String(a.email ?? ''), candidate ? String(candidate._id) : null);
+				let dueAt: string | null = null;
+				if (typeof a.dueInDays === 'number' && a.dueInDays >= 0) {
+					const d = new Date();
+					d.setDate(d.getDate() + Math.min(Math.round(a.dueInDays), 365));
+					d.setHours(18, 0, 0, 0);
+					dueAt = d.toISOString();
+				}
+				return {
+					draft: {
+						kind: 'task',
+						toEmail: assignee.email,
+						toName: assignee.name ?? null,
+						title,
+						candidateId: candidate ? String(candidate._id) : null,
+						candidateName: candidate ? (candidate.fullName ?? candidate.email ?? null) : null,
+						dueAt,
+						note: a.note?.trim().slice(0, 500) || null
+					},
+					note: 'Nothing has been assigned. Tell them to press Assign on the card.'
+				};
+			} catch (e) {
+				if (e instanceof RequestError) return { error: e.message };
+				throw e;
+			}
+		}
+	},
+	{
+		name: 'list_requests',
+		description:
+			"Access requests and tasks involving the person you are talking to: what is waiting on them (for a super admin, every pending access request; for anyone, tasks assigned to them) and what they raised. Use for \"any requests?\", \"what is pending\", \"my tasks\", \"did my access get approved\", \"approve Riya's request\". The items appear as cards with the buttons to act on them — you cannot approve, reject or complete anything yourself.",
+		parameters: {
+			type: 'object',
+			properties: {
+				which: { type: 'string', enum: ['waiting', 'mine', 'both'], description: 'Waiting on them, raised by them, or both (default)' },
+				kind: { type: 'string', enum: ['access', 'task'], description: 'Only access requests, or only tasks' },
+				about: { type: 'string', description: 'Only items involving this person — part of an email or name' }
+			}
+		},
+		run: async (args, caller) => {
+			const a = args as { which?: string; kind?: string; about?: string };
+			const inbox = await inboxFor(caller);
+			const which = a.which === 'waiting' || a.which === 'mine' ? a.which : 'both';
+			let items = [
+				...(which !== 'mine' ? inbox.waiting : []),
+				...(which !== 'waiting' ? [...inbox.mine, ...inbox.recent] : [])
+			];
+			if (a.kind === 'access' || a.kind === 'task') items = items.filter((r) => r.kind === a.kind);
+			if (a.about?.trim()) {
+				const q = a.about.trim().toLowerCase();
+				items = items.filter((r) =>
+					[r.fromEmail, r.fromName, r.toEmail, r.toName, r.candidateName].some((s) => s?.toLowerCase().includes(q))
+				);
+			}
+			// Something both waiting on them and raised by them would otherwise be
+			// listed twice.
+			const seen = new Set<string>();
+			items = items.filter((r) => !seen.has(r.id) && !!seen.add(r.id));
+			return {
+				requests: items,
+				note: items.length
+					? 'These are shown to the user as cards with buttons. Summarise them briefly; do not claim to have acted on any.'
+					: 'Nothing matched.'
+			};
+		}
 	}
 ];
 
 /** The tools this caller may use. A tool they cannot use is never shown to the
  *  model, so there is nothing to talk it into. */
 export function toolsFor(caller: Caller): ToolDef[] {
-	return TOOLS.filter((t) => can(caller, t.cap, t.min ?? 'view'));
+	return TOOLS.filter((t) => (!t.cap || can(caller, t.cap, t.min ?? 'view')) && (!t.when || t.when(caller)));
 }
 
 /** The OpenAI-style schema the API expects. */

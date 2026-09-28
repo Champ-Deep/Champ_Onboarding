@@ -11,9 +11,8 @@
 // is a card appearing that a super admin has to read and approve.
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { Admin } from '$lib/server/db/schema';
-import { audit } from '$lib/server/audit';
-import { CAPS, LEVELS, PRESETS, effectiveLevel, type Level } from '$lib/shared/access';
+import { applyGrant, RequestError } from '$lib/server/requests';
+import { CAPS, LEVELS, type Level } from '$lib/shared/access';
 
 export const config = { runtime: 'nodejs24.x' };
 
@@ -38,47 +37,25 @@ export const POST: RequestHandler = async ({ request, locals, getClientAddress }
 	if (!CAPS[capability]) error(400, 'Unknown capability.');
 	if (!LEVELS.includes(level)) error(400, 'Unknown level.');
 
-	const target = await Admin.findOne({ email });
-	if (!target) error(404, 'No login with that email.');
-
-	const grantee = {
-		preset: PRESETS[target.role] ? target.role : 'hr_admin',
-		grants: {},
-		checkers: {},
-		population: 'all' as const,
-		entities: 'all' as const,
-		tracks: 'all' as const,
-		status: 'active' as const
-	};
-	const before = effectiveLevel(grantee, capability);
-
-	// Written to the studio's grant list, exactly as the studio writes it — a
-	// list rather than a map because capability keys carry dots, which Mongo
-	// treats as paths in a field name.
-	const existing = (Array.isArray(target.grants) ? target.grants : []) as {
-		cap?: string;
-		level?: string;
-	}[];
-	const kept = existing.filter((g) => g.cap !== capability);
-	const grants = [...kept, { cap: capability, level }];
-	await Admin.findByIdAndUpdate(target._id, { $set: { grants } });
-
-	await audit({
-		actor: locals.admin.email,
-		action: 'access_updated',
-		field: `${target.email} · ${capability}`,
-		oldValue: before,
-		newValue: `${level} (proposed by the assistant, applied by hand)`,
-		ip: getClientAddress()
-	});
+	let applied;
+	try {
+		applied = await applyGrant({
+			email,
+			capability,
+			level,
+			actor: locals.admin.email,
+			via: 'proposed by the assistant, applied by hand',
+			ip: getClientAddress()
+		});
+	} catch (e) {
+		if (e instanceof RequestError) error(e.status, e.message);
+		throw e;
+	}
 
 	return json({
 		applied: true,
-		email: target.email,
-		capability,
+		...applied,
 		capabilityLabel: CAPS[capability].label,
-		from: before,
-		to: level,
 		// Said plainly rather than left for someone to discover: the app still
 		// decides access from `role`, so this is recorded intent until the
 		// guards read from the capability model.

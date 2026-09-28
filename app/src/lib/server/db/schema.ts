@@ -364,6 +364,55 @@ const auditLogSchema = new Schema(
 );
 export const AuditLog = models.AuditLog ?? model('AuditLog', auditLogSchema);
 
+// ── Team requests ────────────────────────────────────────────────────────────
+// Work that passes between people through the assistant, in two directions:
+//   access — a teammate asks for a capability; any super admin decides.
+//   task   — a super admin asks one teammate to do something.
+// One collection because both are "a thing someone is waiting on someone else
+// for", read back by the same panel with the same states. The assistant only
+// ever drafts these: a person presses the button that creates one, and a
+// person presses the one that decides it.
+const teamRequestSchema = new Schema(
+	{
+		kind: { type: String, enum: ['access', 'task'], required: true },
+		/** `pending` is open for both kinds. Access ends approved/rejected, a task
+		 *  ends done/declined, and either can be withdrawn by whoever raised it. */
+		status: {
+			type: String,
+			enum: ['pending', 'approved', 'rejected', 'done', 'declined', 'cancelled'],
+			default: 'pending'
+		},
+		fromEmail: { type: String, required: true },
+		/** The assignee of a task. Null for access: it goes to every super admin,
+		 *  and whichever of them gets to it first decides it. */
+		toEmail: { type: String, default: null },
+		// access
+		capability: { type: String, default: null },
+		level: { type: String, default: null },
+		/** What they had when they asked, so the decider sees the jump. */
+		levelAtRequest: { type: String, default: null },
+		// task
+		title: { type: String, default: null },
+		candidateId: { type: Schema.Types.ObjectId, ref: 'Candidate', default: null },
+		dueAt: { type: Date, default: null },
+		/** The reason given by whoever raised it. */
+		note: { type: String, default: null },
+		decidedBy: { type: String, default: null },
+		decidedAt: { type: Date, default: null },
+		decisionNote: { type: String, default: null },
+		/** The one person with an update on this they have not opened yet — the
+		 *  requester once it is decided, the assignee once it is assigned. Drives
+		 *  the badge on the assistant's launcher. */
+		notify: { type: String, default: null }
+	},
+	{ timestamps: true }
+);
+teamRequestSchema.index({ kind: 1, status: 1 });
+teamRequestSchema.index({ toEmail: 1, status: 1 });
+teamRequestSchema.index({ fromEmail: 1, createdAt: -1 });
+teamRequestSchema.index({ notify: 1 });
+export const TeamRequest = models.TeamRequest ?? model('TeamRequest', teamRequestSchema);
+
 // ── Verifications ─────────────────────────────────────────────────────────────
 const verificationSchema = new Schema(
 	{

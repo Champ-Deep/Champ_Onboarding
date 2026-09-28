@@ -7,7 +7,13 @@
 	// from the server and are drawn by this component, so a number the model
 	// invented cannot appear in a table, and a permission change cannot happen
 	// without a human pressing the button below.
+	//
+	// The same goes for team requests: the model drafts an access request or a
+	// task, and it only exists once someone presses Send or Assign. Deciding one
+	// is a button on a card too, never something the model does.
 	import { tick } from 'svelte';
+	import RequestCard from './RequestCard.svelte';
+	import type { Draft, Inbox, RequestView } from '$lib/shared/requests';
 
 	let { admin }: { admin: { email: string; role: string } } = $props();
 
@@ -36,6 +42,11 @@
 		 *  and each is applied on its own. */
 		applied: Record<string, string>;
 		applyErrors: Record<string, string>;
+		drafts?: Draft[];
+		/** Keyed by the draft's position in the turn, once sent. */
+		sent?: Record<number, RequestView>;
+		sendErrors?: Record<number, string>;
+		requests?: RequestView[];
 	};
 
 	const propKey = (p: Proposal) => `${p.email}:${p.capability}`;
@@ -96,12 +107,93 @@
 
 	const isSuperAdmin = $derived(admin.role === 'super_admin');
 
-	const SUGGESTIONS = [
+	const SUGGESTIONS = $derived([
 		'How many candidates are awaiting review?',
 		'Who has an offer letter still in draft?',
 		'Show me a report: name, entity, track, designation, date of joining',
-		'What happened to the last five offer letters?'
-	];
+		isSuperAdmin ? 'Any access requests waiting on me?' : 'I need access to email offer letters to candidates',
+		isSuperAdmin ? 'Ask a teammate to send the offer letter to a candidate' : 'What tasks do I have?'
+	]);
+
+	// ── requests & tasks ────────────────────────────────────────────────────
+	let tab: 'chat' | 'requests' = $state('chat');
+	let inbox = $state<Inbox | null>(null);
+	let inboxError: string | null = $state(null);
+	const badge = $derived(inbox?.badge ?? 0);
+
+	async function loadInbox() {
+		try {
+			const res = await fetch('/admin/ai/requests');
+			if (!res.ok) throw new Error(String(res.status));
+			inbox = await res.json();
+			inboxError = null;
+		} catch {
+			inboxError = 'Could not load requests.';
+		}
+	}
+
+	async function openRequests() {
+		tab = 'requests';
+		await loadInbox();
+		// Opening the tab is seeing the outcomes. Things still waiting on this
+		// person keep the badge lit until they are settled.
+		if (inbox?.badge) {
+			await fetch('/admin/ai/requests/seen', { method: 'POST' }).catch(() => {});
+			await loadInbox();
+		}
+	}
+
+	// The launcher badge is how a super admin learns a request arrived, and how
+	// a teammate learns they were given work, without having to ask. A minute is
+	// soon enough for either, and a hidden tab does not poll at all.
+	$effect(() => {
+		loadInbox();
+		const t = setInterval(() => {
+			if (document.visibilityState === 'visible') loadInbox();
+		}, 60_000);
+		const onVis = () => document.visibilityState === 'visible' && loadInbox();
+		document.addEventListener('visibilitychange', onVis);
+		return () => {
+			clearInterval(t);
+			document.removeEventListener('visibilitychange', onVis);
+		};
+	});
+
+	async function sendDraft(turn: Turn, i: number, d: Draft) {
+		turn.sendErrors = { ...(turn.sendErrors ?? {}) };
+		delete turn.sendErrors[i];
+		const body =
+			d.kind === 'access'
+				? { kind: 'access', capability: d.capability, level: d.to, note: d.note }
+				: { kind: 'task', toEmail: d.toEmail, title: d.title, candidateId: d.candidateId, dueAt: d.dueAt, note: d.note };
+		try {
+			const res = await fetch('/admin/ai/requests', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			const out = await res.json().catch(() => null);
+			if (!res.ok) turn.sendErrors[i] = (out as { message?: string } | null)?.message ?? `Could not send (${res.status}).`;
+			else turn.sent = { ...(turn.sent ?? {}), [i]: out as RequestView };
+		} catch {
+			turn.sendErrors[i] = 'Could not send — check your connection.';
+		}
+		turns = [...turns];
+		loadInbox();
+	}
+
+	/** A card changed state: swap the new version into wherever it is shown. */
+	function cardChanged(next: RequestView) {
+		for (const t of turns) {
+			if (t.requests) t.requests = t.requests.map((r) => (r.id === next.id ? next : r));
+			if (t.sent) for (const k in t.sent) if (t.sent[k].id === next.id) t.sent[k] = next;
+		}
+		turns = [...turns];
+		loadInbox();
+	}
+
+	const dueDay = (iso: string | null) =>
+		iso ? new Date(iso).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : '';
 
 	async function send(text?: string) {
 		const q = (text ?? question).trim();
@@ -136,10 +228,13 @@
 					content: body.reply,
 					report: body.report,
 					proposals: body.proposals ?? [],
+					drafts: body.drafts ?? [],
+					requests: body.requests ?? [],
 					applied: {},
 					applyErrors: {}
 				}
 			];
+			if (body.drafts?.length || body.requests?.length) loadInbox();
 		} catch {
 			error = 'Could not reach the assistant — check your connection.';
 		} finally {
@@ -192,8 +287,9 @@
 	async function toggle() {
 		open = !open;
 		if (open) {
+			loadInbox();
 			await tick();
-			input?.focus();
+			if (tab === 'chat') input?.focus();
 		}
 	}
 
@@ -217,7 +313,13 @@
 				<div class="ptitle">Champ</div>
 				<div class="psub">Answers from your portal data · scoped to your access</div>
 			</div>
-			{#if turns.length}
+			<div class="tabs" role="tablist">
+				<button type="button" role="tab" aria-selected={tab === 'chat'} class:on={tab === 'chat'} onclick={() => (tab = 'chat')}>Chat</button>
+				<button type="button" role="tab" aria-selected={tab === 'requests'} class:on={tab === 'requests'} onclick={openRequests}>
+					Requests{#if badge}<span class="tbadge">{badge}</span>{/if}
+				</button>
+			</div>
+			{#if tab === 'chat' && turns.length}
 				<button class="plink" type="button" onclick={() => (turns = [])}>Clear</button>
 			{/if}
 			<button class="px" type="button" onclick={() => (open = false)} aria-label="Close">
@@ -225,6 +327,46 @@
 			</button>
 		</div>
 
+		{#if tab === 'requests'}
+			<div class="pbody">
+				{#if inboxError}<p class="err">{inboxError}</p>{/if}
+				{#if !inbox}
+					<p class="empty">Loading…</p>
+				{:else}
+					<div class="sec">
+						<span>Waiting on you</span>
+						<button class="plink" type="button" onclick={loadInbox}>Refresh</button>
+					</div>
+					{#each inbox.waiting as r (r.id)}
+						<RequestCard {r} onchange={cardChanged} />
+					{:else}
+						<p class="empty">
+							{isSuperAdmin
+								? 'Nothing waiting. Access requests from the team and tasks given to you land here.'
+								: 'Nothing waiting. Work a super admin gives you lands here.'}
+						</p>
+					{/each}
+
+					{#if inbox.recent.length}
+						<div class="sec"><span>Settled recently</span></div>
+						{#each inbox.recent as r (r.id)}
+							<RequestCard {r} onchange={cardChanged} />
+						{/each}
+					{/if}
+
+					<div class="sec"><span>Raised by you</span></div>
+					{#each inbox.mine as r (r.id)}
+						<RequestCard {r} onchange={cardChanged} />
+					{:else}
+						<p class="empty">
+							{isSuperAdmin
+								? 'Nothing yet. Ask in the chat, e.g. “ask Riya to send the offer letter to Priya”.'
+								: 'Nothing yet. Ask in the chat, e.g. “I need access to email offer letters”.'}
+						</p>
+					{/each}
+				{/if}
+			</div>
+		{:else}
 		<div class="pbody" bind:this={scroller}>
 			{#if !turns.length}
 				<p class="empty">
@@ -319,13 +461,50 @@
 							{#if t.applyErrors[propKey(p)]}<p class="prop-err">{t.applyErrors[propKey(p)]}</p>{/if}
 						</div>
 					{/each}
+
+					{#each t.drafts ?? [] as d, di (di)}
+						{#if t.sent?.[di]}
+							<RequestCard r={t.sent[di]} onchange={cardChanged} />
+						{:else}
+							<div class="draft {d.kind}">
+								<div class="prop-h">{d.kind === 'access' ? 'Access request — not sent yet' : 'Task — not assigned yet'}</div>
+								<div class="prop-b">
+									{#if d.kind === 'access'}
+										{d.capabilityLabel} <code>{d.capability}</code><br />
+										<span class="from">{d.from}</span> → <b>{d.to}</b>
+									{:else}
+										For <b>{d.toName || d.toEmail}</b>{#if d.toName}{' '}<span class="from">({d.toEmail})</span>{/if}
+										<div class="dtitle">{d.title}</div>
+										{#if d.candidateName}<div class="from">About {d.candidateName}</div>{/if}
+										{#if d.dueAt}<div class="from">Due {dueDay(d.dueAt)}</div>{/if}
+									{/if}
+									{#if d.note}<div class="why">{d.note}</div>{/if}
+								</div>
+								<p class="prop-note">
+									{d.kind === 'access'
+										? 'Goes to the super admins. You will see here when one of them decides it.'
+										: 'Shows up in their Champ panel with a badge until they mark it done.'}
+								</p>
+								<button type="button" class="prop-btn" onclick={() => sendDraft(t, di, d)}>
+									{d.kind === 'access' ? 'Send request' : 'Assign task'}
+								</button>
+								{#if t.sendErrors?.[di]}<p class="prop-err">{t.sendErrors[di]}</p>{/if}
+							</div>
+						{/if}
+					{/each}
+
+					{#each t.requests ?? [] as r (r.id)}
+						<RequestCard {r} onchange={cardChanged} />
+					{/each}
 				</div>
 			{/each}
 
 			{#if busy}<div class="turn assistant"><div class="bubble thinking">Looking it up…</div></div>{/if}
 			{#if error}<p class="err">{error}</p>{/if}
 		</div>
+		{/if}
 
+		{#if tab === 'chat'}
 		<div class="pfoot">
 			<textarea
 				bind:this={input}
@@ -339,11 +518,13 @@
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h15M13 6l6 6-6 6" /></svg>
 			</button>
 		</div>
+		{/if}
 	</div>
 {/if}
 
 <button class="launcher" class:on={open} type="button" onclick={toggle} aria-label={open ? 'Close Champ' : 'Ask Champ'} title="Ask Champ">
 	<span aria-hidden="true">{open ? '×' : '✨'}</span>
+	{#if badge && !open}<span class="lbadge" aria-label="{badge} waiting">{badge > 9 ? '9+' : badge}</span>{/if}
 </button>
 
 <style>
@@ -367,6 +548,23 @@
 	.launcher:hover {
 		transform: translateY(-2px);
 		box-shadow: 0 18px 44px -12px rgba(0, 0, 0, 0.7);
+	}
+	.lbadge {
+		position: absolute;
+		top: -3px;
+		right: -3px;
+		min-width: 19px;
+		height: 19px;
+		padding: 0 5px;
+		box-sizing: border-box;
+		border-radius: 999px;
+		background: var(--ae-ember);
+		color: #fff;
+		font-family: var(--ae-font-mono);
+		font-size: 10.5px;
+		font-weight: 600;
+		line-height: 19px;
+		text-align: center;
 	}
 	.launcher.on {
 		font-size: 26px;
@@ -413,6 +611,48 @@
 	.plink { text-decoration: underline; text-underline-offset: 2px; }
 	.px:hover, .plink:hover { color: var(--ae-text); }
 
+	.tabs { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--ae-line); border-radius: 8px; }
+	.tabs button {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		padding: 4px 9px;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		color: var(--ae-muted);
+		font: inherit;
+		font-size: 11.5px;
+		cursor: pointer;
+	}
+	.tabs button.on { background: var(--ae-line); color: var(--ae-text); }
+	.tbadge {
+		min-width: 16px;
+		padding: 0 4px;
+		box-sizing: border-box;
+		border-radius: 999px;
+		background: var(--ae-ember);
+		color: #fff;
+		font-family: var(--ae-font-mono);
+		font-size: 9.5px;
+		line-height: 16px;
+		text-align: center;
+	}
+	.sec {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		font-family: var(--ae-font-mono);
+		font-size: 9.5px;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--ae-muted);
+		margin-top: 4px;
+	}
+	.draft { border: 1px dashed var(--ae-amber); border-radius: 10px; padding: 10px 12px; }
+	.draft.task { border-color: var(--ae-azure); }
+	.draft.task .prop-h { color: var(--ae-azure); }
+	.dtitle { margin-top: 3px; font-weight: 600; }
 	.pbody { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 	.empty { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ae-muted); }
 	.suggest { display: flex; flex-direction: column; gap: 6px; }
