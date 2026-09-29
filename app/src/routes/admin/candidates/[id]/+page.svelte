@@ -1024,6 +1024,22 @@
 	});
 </script>
 
+<!-- The "this went out" line under a send button. Drawn from what the record
+     says was sent, not from the click, so it is still there for whoever opens
+     the page next — the same reasoning as the offer letter's note. -->
+{#snippet sentNote(what: string, at: string, to: string[], by: string | null, justNow: boolean, again: string)}
+	<p class="sent-note">
+		<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12.5l5 5L20 6.5" /></svg>
+		<span>
+			<!-- The IT lists run to nine addresses and this sits in a narrow column,
+			     so two are named and the rest are on hover. -->
+			{what} sent{#if to.length}{' to '}<strong title={to.join(', ')}>{to.slice(0, 2).join(', ')}</strong>{#if to.length > 2}{' '}and {to.length - 2} more{/if}{/if}
+			on {new Date(at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}{#if by}{' by '}{by}{/if}.
+			{justNow ? 'Just now.' : again}
+		</span>
+	</p>
+{/snippet}
+
 <a href="/admin" class="backlink">
 	<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 6l-6 6 6 6" /></svg>
 	All candidates
@@ -1864,8 +1880,15 @@
 				{#if itPreviewError}
 					<p class="it-preview-err">{itPreviewError}</p>
 				{/if}
-				{#if form?.itSetupMailSent}
-					<p class="saved-chip" style="margin-top:6px">IT setup mail sent ✓</p>
+				{#if c.itSetupMailSentAt}
+					{@render sentNote(
+						'IT setup mail',
+						c.itSetupMailSentAt,
+						data.mailSends.it?.to ?? [],
+						data.mailSends.it?.by ?? null,
+						!!form?.itSetupMailSent,
+						'Sending again mails the helpdesk a fresh copy.'
+					)}
 				{/if}
 				<!-- The employee code mail. Same confirm-then-send flow, its own
 				     builder and recipients. Gated on the code existing: a mail
@@ -1908,17 +1931,20 @@
 						Assign the employee code above to enable this.
 					</p>
 				{/if}
-				{#if form?.employeeCodeMailSent}
-					<p class="saved-chip" style="margin-top:6px">Employee code mail sent ✓</p>
+				{#if c.employeeCodeMailSentAt}
+					{@render sentNote(
+						'Employee code mail',
+						c.employeeCodeMailSentAt,
+						data.mailSends.code?.to ?? [],
+						data.mailSends.code?.by ?? null,
+						!!form?.employeeCodeMailSent,
+						'Sending again mails a fresh copy with the current code.'
+					)}
 				{/if}
 
 				<div class="emp-hint">
 					<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-					{#if c.itSetupMailSentAt}
-						Sent {new Date(c.itSetupMailSentAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} · recipients in
-					{:else}
-						Sent manually when you're ready · recipients in
-					{/if}
+					Sent manually when you're ready · recipients in
 					<a href="/admin/settings" style="color:inherit;text-decoration:underline">settings</a>
 				</div>
 			</div>
@@ -3862,6 +3888,12 @@
 		font-size: 11.5px;
 		line-height: 1.5;
 		color: var(--ae-text-2);
+	}
+	/* Addresses are one unbreakable word each, and the IT notes sit in the
+	   narrow side column — without this they run out of the card. */
+	.sent-note span {
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 	.sent-note svg {
 		flex: none;

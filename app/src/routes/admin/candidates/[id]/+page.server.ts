@@ -2,6 +2,7 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import {
 	Admin,
+	AuditLog,
 	Candidate,
 	CandidateFile,
 	Company,
@@ -224,6 +225,32 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 			'a login since removed')
 		: null;
 
+	// Who the IT and employee code mails actually went to, and who sent them.
+	// Read from the audit entry each send writes rather than from settings,
+	// because the settings list can change after the mail has gone — the note
+	// has to say where it went, not where it would go now.
+	const lastSends = await AuditLog.find({
+		candidateId: candidate._id,
+		action: { $in: ['it_setup_mail_sent', 'employee_code_mail_sent'] }
+	})
+		.sort({ createdAt: -1 })
+		.limit(20)
+		.lean();
+	const lastSend = (action: string) => {
+		const row = lastSends.find((r) => r.action === action);
+		if (!row) return null;
+		// Written as "manual → a, b"; older entries used "->".
+		const list = String(row.newValue ?? '').split(/→|->/)[1] ?? '';
+		return {
+			by: row.actor as string,
+			to: list.split(',').map((e) => e.trim()).filter(Boolean)
+		};
+	};
+	const mailSends = {
+		it: lastSend('it_setup_mail_sent'),
+		code: lastSend('employee_code_mail_sent')
+	};
+
 	// Candidates created before an item type existed have no row for it, and the
 	// toggle needs one to write to. Backfilling on read keeps the joining-day
 	// checklist complete for every record without a migration; insertMany with
@@ -328,6 +355,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 			joiningMode: candidate.joiningMode ?? null,
 			itSetupMailSentAt: candidate.itSetupMailSentAt?.toISOString() ?? null
 		},
+		mailSends,
 		companyName: company?.name ?? '',
 		brand: brandBySlug(company?.brandSlug ?? undefined),
 		checklist: checklist.map((s) => ({
