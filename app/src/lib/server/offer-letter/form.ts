@@ -120,6 +120,10 @@ export async function offerLetterInputFromForm(form: FormData): Promise<OfferLet
 
 	const compensationAnnexure = {
 		enabled: form.get('annexureEnabled') === 'on',
+		grossPm: text('annexureGrossPm'),
+		// Posted as a hidden field rather than a checkbox, so a form that never
+		// rendered the row (an older tab still open) reads as "on", not "off".
+		ltaEnabled: form.get('annexureLtaEnabled') !== 'off',
 		basicPm: text('annexureBasicPm'),
 		hraPm: text('annexureHraPm'),
 		ltaPm: text('annexureLtaPm'),
@@ -129,6 +133,7 @@ export async function offerLetterInputFromForm(form: FormData): Promise<OfferLet
 		foodPm: text('annexureFoodPm'),
 		variablePayEnabled: form.get('annexureVariablePayEnabled') === 'on',
 		variablePayPm: text('annexureVariablePayPm'),
+		variablePayReason: text('annexureVariablePayReason').slice(0, 80),
 		extraCash: extraRows(form, 'extraCash'),
 		extraVariable: extraRows(form, 'extraVariable'),
 		extraNonCash: extraRows(form, 'extraNonCash')

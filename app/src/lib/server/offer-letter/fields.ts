@@ -349,6 +349,8 @@ export function offerLetterInputFromDraft(draft: OfferLetterDoc | null): OfferLe
 		paymentClause: draft?.paymentClause ?? DEFAULT_CONSULTANT_PAYMENT_CLAUSE,
 		compensationAnnexure: {
 			enabled: draft?.compensationAnnexure?.enabled ?? false,
+			grossPm: draft?.compensationAnnexure?.grossPm ?? '',
+			ltaEnabled: draft?.compensationAnnexure?.ltaEnabled ?? true,
 			basicPm: draft?.compensationAnnexure?.basicPm ?? '',
 			hraPm: draft?.compensationAnnexure?.hraPm ?? '',
 			ltaPm: draft?.compensationAnnexure?.ltaPm ?? '',
@@ -358,6 +360,7 @@ export function offerLetterInputFromDraft(draft: OfferLetterDoc | null): OfferLe
 			foodPm: draft?.compensationAnnexure?.foodPm ?? '',
 			variablePayEnabled: draft?.compensationAnnexure?.variablePayEnabled ?? false,
 			variablePayPm: draft?.compensationAnnexure?.variablePayPm ?? '',
+			variablePayReason: draft?.compensationAnnexure?.variablePayReason ?? '',
 			extraCash: cash,
 			extraVariable: extras(draft?.compensationAnnexure?.extraVariable),
 			extraNonCash: extras(draft?.compensationAnnexure?.extraNonCash)

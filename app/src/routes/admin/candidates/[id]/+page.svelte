@@ -10,7 +10,7 @@
 		type Track
 	} from '$lib/shared/matrix';
 	import { toIsoDate } from '$lib/shared/dates';
-	import { computeAnnexureTotals } from '$lib/shared/annexure';
+	import { computeAnnexureTotals, GROSS_RULES, structureFromGross } from '$lib/shared/annexure';
 	import GlassSelect from '$lib/components/GlassSelect.svelte';
 	import {
 		SHIFT_TIMINGS,
@@ -653,6 +653,23 @@
 	const annexureCashWithVpPm = $derived(annexureTotals.cashWithVpTotalPm ?? annexureTotals.cashTotalPm);
 	const annexureTotalPm = $derived(annexureTotals.grandTotalPm);
 	const annexureTotalPa = $derived(annexureTotals.grandTotalPa);
+
+	// Typing the gross fills the rows from HR's salary rules (GROSS_RULES in
+	// shared/annexure.ts). It is a fill, not a lock: every row stays editable,
+	// and a figure HR overrides stays overridden until the gross changes again.
+	function fillFromGross(value: string) {
+		annexure.grossPm = value;
+		annexure = structureFromGross(annexure);
+	}
+	function setLta(on: boolean) {
+		annexure.ltaEnabled = on;
+		if (on && !n(annexure.ltaPm)) annexure.ltaPm = String(GROSS_RULES.ltaPm);
+	}
+	/** How far the cash rows are from the gross HR typed — what is left for
+	 *  them to add as Special Allowances, or how far the floors on Basic and
+	 *  HRA have already taken it past. Measured from the rows as they stand,
+	 *  so a figure HR overrode by hand counts. */
+	const grossGap = $derived(n(annexure.grossPm ?? '') ? n(annexure.grossPm ?? '') - annexureCashPm : 0);
 
 	const employmentTypeOptions = [
 		{ value: '', label: 'Select…' },
@@ -2437,6 +2454,36 @@
 										<span>P.A. (auto)</span>
 									</div>
 
+									<div class="annexure-row annexure-gross">
+										<span>Gross salary <em>(fills the rows below)</em></span>
+										<input
+											name="annexureGrossPm"
+											type="text"
+											inputmode="decimal"
+											value={annexure.grossPm ?? ''}
+											oninput={(e) => fillFromGross(e.currentTarget.value)}
+											placeholder="e.g. 40000"
+										/>
+										<span class="annexure-pa">{money(n(annexure.grossPm ?? '') * 12)}</span>
+									</div>
+									<p class="annexure-gross-note">
+										Basic is half the gross (min ₹15,000), HRA half of Basic (min ₹7,500), LTA ₹1,250;
+										PF, gratuity, insurance and longevity follow. Any figure can still be edited.
+									</p>
+									{#if grossGap > 0.004}
+										<p class="annexure-gross-left">
+											₹{money(grossGap)} left to reach the gross — add it below as
+											<strong>Special Allowances</strong> with “+ Add component”.
+										</p>
+									{:else if grossGap < -0.004}
+										<p class="annexure-gross-warn">
+											Cash components come to ₹{money(annexureCashPm)}, which is ₹{money(-grossGap)}
+											more than the gross entered{n(annexure.grossPm ?? '') < GROSS_RULES.basicMinPm + GROSS_RULES.hraMinPm + GROSS_RULES.ltaPm
+												? ' — this gross is below the minimum Basic, HRA and LTA'
+												: ''}.
+										</p>
+									{/if}
+
 									<div class="annexure-row">
 										<span>Basic Salary</span>
 										<input name="annexureBasicPm" type="text" inputmode="decimal" bind:value={annexure.basicPm} placeholder="0.00" />
@@ -2447,11 +2494,22 @@
 										<input name="annexureHraPm" type="text" inputmode="decimal" bind:value={annexure.hraPm} placeholder="0.00" />
 										<span class="annexure-pa">{money(n(annexure.hraPm) * 12)}</span>
 									</div>
-									<div class="annexure-row">
-										<span>LTA</span>
-										<input name="annexureLtaPm" type="text" inputmode="decimal" bind:value={annexure.ltaPm} placeholder="0.00" />
-										<span class="annexure-pa">{money(n(annexure.ltaPm) * 12)}</span>
-									</div>
+									<input type="hidden" name="annexureLtaEnabled" value={annexure.ltaEnabled === false ? 'off' : 'on'} />
+									{#if annexure.ltaEnabled !== false}
+										<div class="annexure-row">
+											<span>LTA</span>
+											<input name="annexureLtaPm" type="text" inputmode="decimal" bind:value={annexure.ltaPm} placeholder="0.00" />
+											<span class="annexure-pa extra-pa">
+												{money(n(annexure.ltaPm) * 12)}
+												<button type="button" class="row-del" aria-label="Remove LTA from this offer" title="Remove LTA from this offer" onclick={() => setLta(false)}>×</button>
+											</span>
+										</div>
+									{:else}
+										<div class="annexure-row annexure-add">
+											<button type="button" class="row-add" onclick={() => setLta(true)}>+ Add LTA back</button>
+											<span></span><span></span>
+										</div>
+									{/if}
 									<!-- Recruiter-added rows for this section. Repeated field names
 									     rather than indexed ones, so removing a row in the middle needs
 									     no renumbering (see extraRows in offer-letter/form.ts). -->
@@ -2496,10 +2554,23 @@
 									</div>
 
 									<div class="annexure-row">
-										<label class="annexure-vp-toggle">
-											<input type="checkbox" name="annexureVariablePayEnabled" bind:checked={annexure.variablePayEnabled} />
-											<span>Variable Pay</span>
-										</label>
+										<div class="annexure-vp-cell">
+											<label class="annexure-vp-toggle">
+												<input type="checkbox" name="annexureVariablePayEnabled" bind:checked={annexure.variablePayEnabled} />
+												<span>Variable Pay</span>
+											</label>
+											<!-- Printed in brackets after the name on page 4, so HR can say
+											     what it is for: "Variable Pay (Quarterly sales target)". -->
+											<input
+												class="annexure-vp-reason"
+												name="annexureVariablePayReason"
+												bind:value={annexure.variablePayReason}
+												placeholder="Reason, e.g. Quarterly target"
+												maxlength="80"
+												disabled={!annexure.variablePayEnabled}
+												aria-label="Variable pay reason"
+											/>
+										</div>
 										<input
 											name="annexureVariablePayPm"
 											type="text"
@@ -3891,6 +3962,18 @@
 	}
 	/* Addresses are one unbreakable word each, and the IT notes sit in the
 	   narrow side column — without this they run out of the card. */
+	.annexure-gross { background: rgba(255, 125, 85, 0.07); border-radius: 8px; }
+	.annexure-gross em { font-style: normal; color: var(--ae-muted); font-weight: 400; }
+	.annexure-gross-note,
+	.annexure-gross-left,
+	.annexure-gross-warn {
+		margin: 2px 0 8px;
+		font-size: 11px;
+		line-height: 1.5;
+		color: var(--ae-muted);
+	}
+	.annexure-gross-left { color: var(--ae-text-2); }
+	.annexure-gross-warn { color: var(--ae-amber); }
 	.sent-note span {
 		min-width: 0;
 		overflow-wrap: anywhere;
@@ -4023,6 +4106,16 @@
 	.annexure-vp-toggle input {
 		width: 14px;
 		height: 14px;
+	}
+	.annexure-vp-cell {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		min-width: 0;
+	}
+	.annexure-vp-reason {
+		width: 100%;
+		font-size: 11.5px;
 	}
 	.annexure-table {
 		display: flex;

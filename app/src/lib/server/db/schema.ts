@@ -469,6 +469,12 @@ const offerLetterSchema = new Schema(
 		// page entirely for a candidate rather than send one full of zeros.
 		compensationAnnexure: {
 			enabled: { type: Boolean, default: false },
+			/** The monthly gross the rows were filled from (GROSS_RULES in
+			 *  shared/annexure.ts). Kept so reopening the draft shows it. */
+			grossPm: { type: String, default: null },
+			/** HR can take LTA off an offer. Defaults on, so drafts saved before
+			 *  it could be removed keep their LTA row. */
+			ltaEnabled: { type: Boolean, default: true },
 			basicPm: { type: String, default: null },
 			hraPm: { type: String, default: null },
 			ltaPm: { type: String, default: null },
@@ -480,6 +486,8 @@ const offerLetterSchema = new Schema(
 			// annexure-wide `enabled` above — HR adds/removes it per offer.
 			variablePayEnabled: { type: Boolean, default: false },
 			variablePayPm: { type: String, default: null },
+			/** HR's reason, printed as "Variable Pay (reason)". */
+			variablePayReason: { type: String, default: null },
 			/** Rows HR adds beyond the fixed ones, per section — see
 			 *  CompensationAnnexure in shared/annexure.ts. Stored as
 			 *  label+amount pairs so a new pay component needs no migration. */
